@@ -12,7 +12,7 @@ const tokenSchema = new mongoose.Schema({
 
   status: {
     type: String,
-    enum: ["pending", "manual", "waiting", "active", "done", "missed"],
+    enum: ["pending", "manual", "waiting", "active", "done", "missed", "left"],
     default: "pending",
   },
 
@@ -29,24 +29,26 @@ const tokenSchema = new mongoose.Schema({
   updatedAt: { type: Date, default: Date.now },
 
   // ⭐ NEW FIELDS FOR ETA SYSTEM ⭐
-  startedAt: { type: Date, default: null },     // when doctor starts the consultation
+  startedAt: { type: Date, default: null },     // when doctor starts consultation
   doneAt: { type: Date, default: null },        // when doctor finishes
   actualDuration: { type: Number, default: null }, // duration in ms
   doctorId: { type: String, default: "global" },   // future multi-doctor support
+  leftAt: { type: Date, default: null }, // when marked left/no-show
+
+  // persisted absolute ETA timestamp (ISO) for stable countdown
+  estimatedAt: { type: Date, default: null },
 });
 
-// Auto-assign SL tokenNumber
+// Auto-assign SL tokenNumber if missing (fallback). Primary atomic assignment should be via Counter model for staff add-manual.
 tokenSchema.pre("save", async function (next) {
   try {
     if (!this.tokenDate) {
-      this.tokenDate = new Date(this.tokenTime || Date.now())
-        .toISOString()
-        .split("T")[0];
+      this.tokenDate = new Date(this.tokenTime || Date.now()).toISOString().split("T")[0];
     }
 
     if (this.isNew && !this.tokenNumber) {
+      // Avoid model re-registration
       const TokenModel = mongoose.models.Token || mongoose.model("Token", tokenSchema);
-
       const count = await TokenModel.countDocuments({ tokenDate: this.tokenDate });
       this.tokenNumber = count + 1;
     }
