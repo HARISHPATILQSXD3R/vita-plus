@@ -1,148 +1,94 @@
-// backend/src/utils/etaHelpers.js
+
 import Token from "../models/Token.js";
 import ServiceStat from "../models/ServiceStat.js";
 
 /**
- * computeAvgMs(doctorId)
- * - Prefer ServiceStat
- * - Fallback: recent done tokens
- * - Final fallback: 10 minutes
- * - CLAMP between 3 min and 30 min to avoid crazy values
- */
+ * computeAvgMs(doctorId)
+ * - FORCED to return a fixed 10 minutes (600000 ms).
+ * - Keeps async signature to be drop-in compatible with existing callers.
+ */
 export async function computeAvgMs(doctorId = "global") {
-  let avg = 10 * 60 * 1000; // default 10 minutes
-
-  try {
-    const stat = await ServiceStat.findOne({ doctorId });
-    if (stat && stat.avgMs) {
-      avg = stat.avgMs;
-    } else {
-      const recent = await Token.find({ status: "done" })
-        .sort({ updatedAt: -1 })
-        .limit(20)
-        .lean();
-
-      if (recent.length) {
-        const diffs = recent
-          .map((t) => {
-            // prefer actual consultation start time then arrival/waiting/tokenTime
-            const start = t.startedAt || t.arrivedAt || t.waitingAt || t.tokenTime;
-            const end = t.updatedAt || t.doneAt || null;
-            if (!start || !end) return null;
-            const d = new Date(end).getTime() - new Date(start).getTime();
-            return isFinite(d) && d > 0 ? d : null;
-          })
-          .filter(Boolean);
-
-        if (diffs.length) {
-          const sum = diffs.reduce((s, v) => s + v, 0);
-          avg = Math.round(sum / diffs.length);
-        }
-      }
-    }
-  } catch (err) {
-    console.error("computeAvgMs error:", err);
-  }
-
-  // 🔒 Clamp between 3 and 30 minutes
-  const MIN = 3 * 60 * 1000;
-  const MAX = 30 * 60 * 1000;
-  if (avg < MIN) avg = MIN;
-  if (avg > MAX) avg = MAX;
-
-  return avg;
+  try {
+    // Fixed average: 10 minutes per patient
+    return 10 * 60 * 1000;
+  } catch (err) {
+    console.error("computeAvgMs error (forced):", err);
+    return 10 * 60 * 1000;
+  }
 }
 
 /**
- * recomputeEstimatedAtForToday(doctorId)
- * - Only assign ETA to tokens with status 'pending' or 'active'
- * - If a token has other status (e.g. waiting/manual/left) we clear estimatedAt
- * - Anchor uses currently active token (if exists) to compute remaining for that active,
- *   otherwise anchor = now.
- */
+ * recomputeEstimatedAtForToday(doctorId)
+ * - Uses computeAvgMs(), which now returns the fixed 10 minutes.
+ * - Logic left unchanged.
+ */
 export async function recomputeEstimatedAtForToday(doctorId = "global") {
-  try {
-    const today = new Date().toISOString().split("T")[0];
-    const avgMs = await computeAvgMs(doctorId);
+  try {
+    const today = new Date().toISOString().split("T")[0];
+    const avgMs = await computeAvgMs(doctorId);
 
-    // fetch all today's tokens (we need to inspect statuses and preserve ordering)
-    const tokens = await Token.find({ tokenDate: today }).sort({ tokenNumber: 1 });
+    // fetch today's tokens in order
+    const tokens = await Token.find({ tokenDate: today }).sort({ tokenNumber: 1 });
 
-    // allowed statuses to receive ETAs
-    const ALLOWED = new Set(["pending", "active"]);
+    // pick anchor:
+    // if there's an active token, compute remaining for that token and anchor future after remaining
+    const active = tokens.find((t) => t.status === "active");
+    let running = Date.now();
 
-    // find active token (if any)
-    const active = tokens.find((t) => t.status === "active");
-    let running = Date.now();
+    if (active) {
+      const startMs = active.startedAt ? new Date(active.startedAt).getTime() :
+                      active.arrivedAt ? new Date(active.arrivedAt).getTime() :
+                      active.tokenTime ? new Date(active.tokenTime).getTime() :
+                      Date.now();
+      const elapsed = Math.max(0, Date.now() - startMs);
+      const remaining = Math.max(0, avgMs - elapsed);
+      running = Date.now() + remaining;
+    } else {
+      // if no active, use now as anchor (doctor will start next)
+      running = Date.now();
+    }
 
-    if (active) {
-      const startMs = active.startedAt
-        ? new Date(active.startedAt).getTime()
-        : active.arrivedAt
-        ? new Date(active.arrivedAt).getTime()
-        : active.tokenTime
-        ? new Date(active.tokenTime).getTime()
-        : Date.now();
+    const updatedTokens = [];
 
-      const elapsed = Math.max(0, Date.now() - startMs);
-      const remaining = Math.max(0, avgMs - elapsed);
-      running = Date.now() + remaining;
-    } else {
-      running = Date.now();
-    }
+    for (const t of tokens) {
+      // skip done tokens -- clear estimatedAt for done
+      if (t.status === "done") {
+        if (t.estimatedAt) {
+          t.estimatedAt = null;
+          await t.save();
+          updatedTokens.push(t);
+        }
+        continue;
+      }
 
-    const updatedTokens = [];
+      // desired ETA for this token (absolute)
+      const desiredEstMs = running;
+      const desiredEstDate = new Date(desiredEstMs);
 
-    for (const t of tokens) {
-      // done tokens: clear ETA if present
-      if (t.status === "done") {
-        if (t.estimatedAt) {
-          t.estimatedAt = null;
-          await t.save();
-          updatedTokens.push(t);
-        }
-        continue;
-      }
+      // existing ETA logic: preserve if remaining > avgMs/2
+      if (t.estimatedAt) {
+        const prevMs = new Date(t.estimatedAt).getTime();
+        const remainingMs = prevMs - Date.now();
 
-      // If token status is NOT allowed (waiting, manual, left, missed...), clear ETA if present
-      if (!ALLOWED.has(t.status)) {
-        if (t.estimatedAt) {
-          t.estimatedAt = null;
-          await t.save();
-          updatedTokens.push(t);
-        }
-        continue;
-      }
+        if (remainingMs > Math.floor(avgMs / 2)) {
+          // preserve existing ETA and advance running by avgMs from that saved ETA
+          running = prevMs + avgMs;
+          continue; // no save needed
+        }
+      }
 
-      // Now t.status is 'pending' or 'active' -> compute desired ETA
-      const desiredEstMs = running;
-      const desiredEstDate = new Date(desiredEstMs);
+      // otherwise update to desiredEstDate
+      t.estimatedAt = desiredEstDate;
+      await t.save();
+      updatedTokens.push(t);
 
-      // Preserve existing ETA if it still has enough remaining (avoid jitter):
-      if (t.estimatedAt) {
-        const prevMs = new Date(t.estimatedAt).getTime();
-        const remainingMs = prevMs - Date.now();
+      // advance running for next token
+      running = desiredEstMs + avgMs;
+    }
 
-        // if previously saved ETA still has more than half an avg block remaining, keep it
-        if (remainingMs > Math.floor(avgMs / 2)) {
-          // advance running to follow that preserved ETA
-          running = prevMs + avgMs;
-          continue; // no save
-        }
-      }
-
-      // Assign new ETA and save
-      t.estimatedAt = desiredEstDate;
-      await t.save();
-      updatedTokens.push(t);
-
-      // increment running by avg for the next token that receives ETA
-      running = desiredEstMs + avgMs;
-    }
-
-    return { updatedTokens, avgMs };
-  } catch (err) {
-    console.error("recomputeEstimatedAtForToday error:", err);
-    return { updatedTokens: [], avgMs: 10 * 60 * 1000 };
-  }
+    return { updatedTokens, avgMs };
+  } catch (err) {
+    console.error("recomputeEstimatedAtForToday error:", err);
+    return { updatedTokens: [], avgMs: 10 * 60 * 1000 };
+  }
 }
