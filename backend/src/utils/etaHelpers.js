@@ -75,7 +75,7 @@ export async function recomputeEstimatedAtForToday(doctorId = "global") {
           running = prevMs + avgMs;
           continue; // no save needed
         }
-      }
+     }
 
       // otherwise update to desiredEstDate
       t.estimatedAt = desiredEstDate;
