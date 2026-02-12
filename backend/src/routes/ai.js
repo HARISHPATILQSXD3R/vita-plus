@@ -4,6 +4,7 @@ const router = express.Router();
 
 router.post("/chat", async (req, res) => {
   try {
+     console.log("GROQ KEY:", process.env.GROQ_API_KEY);
     const { messages } = req.body;
 
     const response = await fetch(
@@ -24,7 +25,7 @@ router.post("/chat", async (req, res) => {
     );
 
     const data = await response.json();
-
+    console.log("GROQ RESPONSE:", data);
     const reply =
       data?.choices?.[0]?.message?.content ||
       "I'm here with you.";
