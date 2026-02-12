@@ -3,6 +3,7 @@ import express from "express";
 import mongoose from "mongoose";
 import cors from "cors";
 import dotenv from "dotenv";
+import aiRoutes from "./routes/ai.js";
 
 import staffRoutes from "./routes/staffRoutes.js";
 import patientRoutes from "./routes/patientRoutes.js";
@@ -31,6 +32,7 @@ app.use("/patient", patientRoutes);
 app.use("/token", tokenRoutes);
 app.use("/staff/tokens", staffTokenRoutes);
 app.use("/doctor", doctorRoutes);
+app.use("/api/ai", aiRoutes);
 
 // Port
 const PORT = process.env.PORT || 4000;
