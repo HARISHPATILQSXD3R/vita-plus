@@ -2,7 +2,6 @@
 import express from "express";
 import mongoose from "mongoose";
 import cors from "cors";
-import dotenv from "dotenv";
 import aiRoutes from "./routes/ai.js";
 
 import staffRoutes from "./routes/staffRoutes.js";
